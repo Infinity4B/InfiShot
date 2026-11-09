@@ -1,9 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"image"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/egoist/mygo"
@@ -38,6 +40,15 @@ type overlay struct {
 	scale   float32 // pixels of img per DIP
 	ocrOnly bool    // recognize the selection as soon as it is made
 	windows []rect  // the windows under the overlay, front to back
+	snap    snaps   // where the edges of the selection snap; none if off
+
+	// The elements found in the picture, in a while (detectElements);
+	// the pointer highlights the smallest under it, and the wheel the
+	// larger ones around it, level steps up.
+	elements []rect
+	level    int
+	levelOf  rect    // the smallest under the pointer when level was set
+	wheel    float32 // the scrolling not yet a step
 
 	sel   rect // the selection, in the window's DIPs
 	has   bool // whether sel is a made selection
@@ -83,6 +94,9 @@ func newOverlay(a *app, d mygo.Display, img *image.RGBA, wins []capture.Window, 
 			o.windows = append(o.windows, r)
 		}
 	}
+	if a.cfg.Snap {
+		o.setElements(nil)
+	}
 	cur := mygo.Screen.CursorScreenPoint()
 	o.ptr = ui.Point{X: float32(cur.X - b.X), Y: float32(cur.Y - b.Y)}
 
@@ -115,7 +129,24 @@ func newOverlay(a *app, d mygo.Display, img *image.RGBA, wins []capture.Window, 
 		}
 	})
 	o.win.Focus()
+	if a.cfg.Snap {
+		go func() {
+			els := detectElements(img, o.scale)
+			o.win.Update(func() { o.setElements(els) })
+		}()
+	}
 	return o
+}
+
+// setElements takes the elements found in the picture, and snaps the
+// edges of the selection to them, to the windows and to lines in the
+// picture.
+func (o *overlay) setElements(els []rect) {
+	o.elements = els
+	xs, ys := windowEdges(o.windows, o.bounds())
+	exs, eys := elementEdges(els)
+	xs, ys = append(xs, exs...), append(ys, eys...)
+	o.snap = snaps{x: snapTo(xs, o.img, o.scale, true), y: snapTo(ys, o.img, o.scale, false)}
 }
 
 // toolKeys are the tools in the toolbar's order, with their keys.
@@ -265,12 +296,81 @@ func (o *overlay) current() (rect, bool) {
 }
 
 func (o *overlay) candidate() rect {
+	ch := o.chain()
+	return ch[clampInt(o.level, 0, len(ch)-1)]
+}
+
+// elementPad is the room, in DIPs, left around an element highlighted,
+// for it not to touch the edges of the picture taken of it.
+const elementPad = 6
+
+// chain is what the pointer can highlight, smallest first: the elements
+// under it in the window under it with room around them, that window,
+// and the display.
+func (o *overlay) chain() []rect {
+	screen := o.bounds()
+	win := screen
 	for _, w := range o.windows {
 		if w.contains(o.ptr.X, o.ptr.Y) {
-			return w
+			win = w
+			break
 		}
 	}
-	return o.bounds()
+	var ch []rect
+	for _, e := range o.elements {
+		if !e.contains(o.ptr.X, o.ptr.Y) || !e.inside(win, 1) {
+			continue
+		}
+		p := e.pad(elementPad).intersect(win)
+		if !p.near(win, 3) {
+			ch = append(ch, p)
+		}
+	}
+	slices.SortStableFunc(ch, func(a, b rect) int { return cmp.Compare(a.W*a.H, b.W*b.H) })
+	// Of boxes about the same, the smallest.
+	kept := ch[:0]
+	for _, e := range ch {
+		if len(kept) == 0 || !e.near(kept[len(kept)-1], 2) {
+			kept = append(kept, e)
+		}
+	}
+	ch = append(kept, win)
+	if win != screen {
+		ch = append(ch, screen)
+	}
+	return ch
+}
+
+// aim follows the pointer with the highlight: from the smallest element
+// under it again when that changes.
+func (o *overlay) aim() {
+	if o.has || o.grab != handleNone {
+		return
+	}
+	if first := o.chain()[0]; first != o.levelOf {
+		o.level, o.levelOf, o.wheel = 0, first, 0
+	}
+}
+
+// scroll steps the highlight to a larger element around the pointer, or
+// a smaller one, a step a notch of a wheel, or 24 DIPs of a touchpad.
+func (o *overlay) scroll(ev ui.InputEvent) {
+	if o.has || o.grab != handleNone || ev.DY == 0 {
+		return
+	}
+	step := 0
+	if ev.Precise {
+		o.wheel += ev.DY
+		for abs(o.wheel) >= 24 {
+			step += int(math.Copysign(1, float64(o.wheel)))
+			o.wheel -= float32(math.Copysign(24, float64(o.wheel)))
+		}
+	} else {
+		step = int(math.Copysign(1, float64(ev.DY)))
+	}
+	// Scrolling up, away, takes in more.
+	n := len(o.chain())
+	o.level = clampInt(clampInt(o.level, 0, n-1)-step, 0, n-1)
 }
 
 func (o *overlay) cursor() ui.Cursor {
@@ -298,13 +398,20 @@ func (o *overlay) cursor() ui.Cursor {
 func (o *overlay) input(ev ui.InputEvent) bool {
 	pt := ui.Point{X: ev.X, Y: ev.Y}
 	switch ev.Kind {
+	case ui.InputScroll:
+		o.ptr = pt
+		o.aim()
+		o.scroll(ev)
+		return true
+
 	case ui.InputPointerMove:
 		o.ptr = pt
+		o.aim()
 		switch {
 		case o.drawing != nil && ev.Button == 0:
 			o.extend(pt, ev.Mods&ui.Shift != 0)
 		case o.grab != handleNone && ev.Button == 0:
-			o.dragTo(pt)
+			o.dragTo(pt, ev.Mods)
 		}
 		return true
 
@@ -380,7 +487,7 @@ func (o *overlay) input(ev ui.InputEvent) bool {
 			o.grab = handleNone
 			return true
 		}
-		o.dragTo(pt)
+		o.dragTo(pt, ev.Mods)
 		if o.grab == handleCreate {
 			if !o.moved {
 				// A click takes the window under it, or the display.
@@ -446,18 +553,25 @@ func (o *overlay) extend(pt ui.Point, square bool) {
 
 func copySign(v, sign float32) float32 { return float32(math.Copysign(float64(v), float64(sign))) }
 
-func (o *overlay) dragTo(pt ui.Point) {
+// dragTo takes the grab to pt. The edges it moves snap, unless Option
+// is held.
+func (o *overlay) dragTo(pt ui.Point, mods ui.Modifiers) {
 	dx, dy := pt.X-o.press.X, pt.Y-o.press.Y
 	if !o.moved && abs(dx) < 3 && abs(dy) < 3 {
 		return
 	}
 	o.moved = true
+	s := o.snap
+	if mods&ui.Alt != 0 {
+		s = snaps{}
+	}
 	if o.grab == handleCreate {
+		// As dragging the corner of a selection with no size at the press.
 		b := o.bounds()
-		o.sel = span(o.press.X, o.press.Y, clamp(pt.X, 0, b.W), clamp(pt.Y, 0, b.H))
+		o.sel = drag(rect{X: o.press.X, Y: o.press.Y}, handleSE, clamp(pt.X, 0, b.W)-o.press.X, clamp(pt.Y, 0, b.H)-o.press.Y, b, s)
 		return
 	}
-	o.sel = drag(o.orig, o.grab, dx, dy, o.bounds())
+	o.sel = drag(o.orig, o.grab, dx, dy, o.bounds(), s)
 }
 
 func (o *overlay) nudge(dx, dy float32, grow bool) {
@@ -465,7 +579,7 @@ func (o *overlay) nudge(dx, dy float32, grow bool) {
 	if grow {
 		h = handleSE
 	}
-	if r := drag(o.sel, h, dx, dy, o.bounds()); r.W >= 2 && r.H >= 2 {
+	if r := drag(o.sel, h, dx, dy, o.bounds(), snaps{}); r.W >= 2 && r.H >= 2 {
 		o.sel = r
 	}
 }

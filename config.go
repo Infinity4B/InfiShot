@@ -27,6 +27,9 @@ type config struct {
 	// PinSelectText recognizes the text in pins, for the pointer to
 	// select it there.
 	PinSelectText bool `json:"pinSelectText"`
+	// Snap makes the edges of the selection snap to the edges of windows
+	// and of what is in them while it is dragged.
+	Snap bool `json:"snap"`
 }
 
 func defaultConfig() config {
@@ -36,6 +39,7 @@ func defaultConfig() config {
 		PinShortcut:     "Ctrl+Shift+V",
 		OCRLanguages:    []string{"zh-Hans", "zh-Hant", "en-US"},
 		PinSelectText:   true,
+		Snap:            true,
 	}
 }
 

@@ -83,30 +83,52 @@ func hit(r rect, x, y, tol float32) handle {
 	return handleNone
 }
 
-// drag moves the part h of orig by (dx, dy), keeping it in bounds. Edges
-// dragged past the opposite one flip the selection, as in every editor.
-func drag(orig rect, h handle, dx, dy float32, bounds rect) rect {
+// drag moves the part h of orig by (dx, dy), keeping it in bounds, the
+// edges it moves snapping with s. Edges dragged past the opposite one
+// flip the selection, as in every editor.
+func drag(orig rect, h handle, dx, dy float32, bounds rect, s snaps) rect {
 	if h == handleMove {
 		x := clamp(orig.X+dx, bounds.X, bounds.right()-orig.W)
 		y := clamp(orig.Y+dy, bounds.Y, bounds.bottom()-orig.H)
+		x = clamp(snapMove(s.snapX, x, orig.W, y, y+orig.H), bounds.X, bounds.right()-orig.W)
+		y = clamp(snapMove(s.snapY, y, orig.H, x, x+orig.W), bounds.Y, bounds.bottom()-orig.H)
 		return rect{X: x, Y: y, W: orig.W, H: orig.H}
 	}
 	l, t, r, b := orig.X, orig.Y, orig.right(), orig.bottom()
 	switch h {
 	case handleN, handleNE, handleNW:
-		t += dy
+		t = clamp(t+dy, bounds.Y, bounds.bottom())
 	case handleS, handleSE, handleSW:
-		b += dy
+		b = clamp(b+dy, bounds.Y, bounds.bottom())
 	}
 	switch h {
 	case handleW, handleNW, handleSW:
-		l += dx
+		l = clamp(l+dx, bounds.X, bounds.right())
 	case handleE, handleNE, handleSE:
-		r += dx
+		r = clamp(r+dx, bounds.X, bounds.right())
 	}
-	l, r = clamp(l, bounds.X, bounds.right()), clamp(r, bounds.X, bounds.right())
-	t, b = clamp(t, bounds.Y, bounds.bottom()), clamp(b, bounds.Y, bounds.bottom())
-	return span(l, t, r, b)
+	// The moved edges snap, across the span the others give them.
+	nl, nr, nt, nb := l, r, t, b
+	switch h {
+	case handleW, handleNW, handleSW:
+		nl = s.snapX(l, t, b)
+	case handleE, handleNE, handleSE:
+		nr = s.snapX(r, t, b)
+	}
+	switch h {
+	case handleN, handleNE, handleNW:
+		nt = s.snapY(t, l, r)
+	case handleS, handleSE, handleSW:
+		nb = s.snapY(b, l, r)
+	}
+	// Not onto the opposite edge, which would leave nothing.
+	if abs(nr-nl) < 1 {
+		nl, nr = l, r
+	}
+	if abs(nb-nt) < 1 {
+		nt, nb = t, b
+	}
+	return span(nl, nt, nr, nb)
 }
 
 func (h handle) cursor() ui.Cursor {

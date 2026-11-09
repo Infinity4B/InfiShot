@@ -41,20 +41,20 @@ func TestDrag(t *testing.T) {
 	bounds := rect{0, 0, 1000, 800}
 	r := rect{100, 100, 200, 100}
 
-	if got := drag(r, handleMove, 50, -20, bounds); got != (rect{150, 80, 200, 100}) {
+	if got := drag(r, handleMove, 50, -20, bounds, snaps{}); got != (rect{150, 80, 200, 100}) {
 		t.Errorf("move = %+v", got)
 	}
-	if got := drag(r, handleMove, -500, 0, bounds); got.X != 0 || got.W != 200 {
+	if got := drag(r, handleMove, -500, 0, bounds, snaps{}); got.X != 0 || got.W != 200 {
 		t.Errorf("move past the edge = %+v", got)
 	}
-	if got := drag(r, handleSE, 10, 20, bounds); got != (rect{100, 100, 210, 120}) {
+	if got := drag(r, handleSE, 10, 20, bounds, snaps{}); got != (rect{100, 100, 210, 120}) {
 		t.Errorf("resize SE = %+v", got)
 	}
 	// Dragging the left edge past the right one flips the selection.
-	if got := drag(r, handleW, 250, 0, bounds); got != (rect{300, 100, 50, 100}) {
+	if got := drag(r, handleW, 250, 0, bounds, snaps{}); got != (rect{300, 100, 50, 100}) {
 		t.Errorf("flip = %+v", got)
 	}
-	if got := drag(r, handleN, 0, -500, bounds); got.Y != 0 || got.bottom() != 200 {
+	if got := drag(r, handleN, 0, -500, bounds, snaps{}); got.Y != 0 || got.bottom() != 200 {
 		t.Errorf("resize past the edge = %+v", got)
 	}
 }
