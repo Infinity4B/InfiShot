@@ -1,0 +1,10 @@
+{
+  "name": "InfiShot",
+  "identifier": "io.github.infinity4b.infishot",
+  "version": "0.1.0",
+  "description": "截图、贴图、文字识别",
+  "out": "build",
+  "macos": {
+    "infoPlist": { "LSUIElement": true }
+  }
+}
