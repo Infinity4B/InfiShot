@@ -11,26 +11,27 @@ import (
 	"testing"
 )
 
-type fakeSavePanel struct {
-	showCalls  int
+type fakeSaveHandle struct {
+	opts       saveOptions
+	done       func(path string, err error)
 	focusCalls int
-	lastOpts   saveOptions
-	pending    func(path string, err error)
-	syncErr    error
 }
 
-func (f *fakeSavePanel) show(opts saveOptions, done func(path string, err error)) {
-	f.showCalls++
-	f.lastOpts = opts
+func (h *fakeSaveHandle) focus() { h.focusCalls++ }
+
+type fakeSavePanel struct {
+	handles []*fakeSaveHandle
+	syncErr error
+}
+
+func (f *fakeSavePanel) show(opts saveOptions, done func(path string, err error)) saveHandle {
 	if f.syncErr != nil {
 		done("", f.syncErr)
-		return
+		return nil
 	}
-	f.pending = done
-}
-
-func (f *fakeSavePanel) focus() {
-	f.focusCalls++
+	h := &fakeSaveHandle{opts: opts, done: done}
+	f.handles = append(f.handles, h)
+	return h
 }
 
 func TestEnsurePNGExt(t *testing.T) {
@@ -49,49 +50,75 @@ func TestEnsurePNGExt(t *testing.T) {
 	}
 }
 
-func TestSaveSinglePanelGuard(t *testing.T) {
+func TestSavePerImagePanels(t *testing.T) {
 	dir := t.TempDir()
 	fake := &fakeSavePanel{}
 	a := &app{
 		cfg:       config{SaveDir: dir},
 		savePanel: fake,
 	}
-	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	imgA := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	imgB := image.NewRGBA(image.Rect(0, 0, 3, 3))
 
-	a.saveOnMain(img)
-	if !a.saving {
-		t.Fatal("a.saving = false, want true while panel is open")
+	// First save opens a panel for imgA.
+	a.saveOnMain(imgA)
+	if !a.saveOpen() {
+		t.Fatal("a.saveOpen() = false, want true while panel A is open")
 	}
-	if fake.showCalls != 1 || fake.focusCalls != 0 {
-		t.Fatalf("after first save: show=%d focus=%d, want 1, 0", fake.showCalls, fake.focusCalls)
+	if len(fake.handles) != 1 {
+		t.Fatalf("show count = %d, want 1", len(fake.handles))
 	}
-	if fake.lastOpts.title != "保存截图" || fake.lastOpts.dir != dir {
-		t.Fatalf("opts = %+v, want title=保存截图 dir=%q", fake.lastOpts, dir)
+	hA := fake.handles[0]
+	if hA.opts.title != "保存截图" || hA.opts.dir != dir {
+		t.Fatalf("opts = %+v, want title=保存截图 dir=%q", hA.opts, dir)
 	}
-	if !strings.HasPrefix(fake.lastOpts.name, "InfiShot_") || !strings.HasSuffix(fake.lastOpts.name, ".png") {
-		t.Fatalf("opts.name = %q, want InfiShot_*.png", fake.lastOpts.name)
-	}
-
-	// Second request while open must focus the existing panel, not open another.
-	a.saveOnMain(img)
-	if fake.showCalls != 1 || fake.focusCalls != 1 {
-		t.Fatalf("while open: show=%d focus=%d, want 1, 1", fake.showCalls, fake.focusCalls)
-	}
-	if !a.saving {
-		t.Fatal("a.saving = false while panel is still open")
+	if !strings.HasPrefix(hA.opts.name, "InfiShot_") || !strings.HasSuffix(hA.opts.name, ".png") {
+		t.Fatalf("opts.name = %q, want InfiShot_*.png", hA.opts.name)
 	}
 
-	// Dismissing the panel clears a.saving so a subsequent save opens a new one.
-	fake.pending("", nil)
-	if a.saving {
-		t.Fatal("a.saving = true after panel closed")
+	// Repeating save for the same image focuses its panel instead of opening another.
+	a.saveOnMain(imgA)
+	if len(fake.handles) != 1 || hA.focusCalls != 1 {
+		t.Fatalf("same image: shows=%d focusA=%d, want 1, 1", len(fake.handles), hA.focusCalls)
 	}
 
-	a.saveOnMain(img)
-	if fake.showCalls != 2 || !a.saving {
-		t.Fatalf("after reopen: show=%d saving=%v, want 2, true", fake.showCalls, a.saving)
+	// Saving a different image while panel A is open opens a second panel.
+	a.saveOnMain(imgB)
+	if len(fake.handles) != 2 {
+		t.Fatalf("different image: shows=%d, want 2", len(fake.handles))
 	}
-	fake.pending("", nil)
+	hB := fake.handles[1]
+	if hA.focusCalls != 1 || hB.focusCalls != 0 {
+		t.Fatalf("focuses after B opens: A=%d B=%d, want 1, 0", hA.focusCalls, hB.focusCalls)
+	}
+
+	// Repeating save for imgB focuses panel B, not panel A.
+	a.saveOnMain(imgB)
+	if len(fake.handles) != 2 || hA.focusCalls != 1 || hB.focusCalls != 1 {
+		t.Fatalf("repeat B: shows=%d focusA=%d focusB=%d, want 2, 1, 1", len(fake.handles), hA.focusCalls, hB.focusCalls)
+	}
+
+	// Closing panel A keeps saveOpen true (pins stay lowered) while panel B is open.
+	hA.done("", nil)
+	if !a.saveOpen() {
+		t.Fatal("a.saveOpen() = false with panel B still open, want true")
+	}
+
+	// Closing panel B clears saveOpen (pins can be raised again).
+	hB.done("", nil)
+	if a.saveOpen() {
+		t.Fatal("a.saveOpen() = true after all panels closed, want false")
+	}
+
+	// Once closed, imgA can open a fresh panel.
+	a.saveOnMain(imgA)
+	if len(fake.handles) != 3 || !a.saveOpen() {
+		t.Fatalf("reopen A: shows=%d saveOpen=%v, want 3, true", len(fake.handles), a.saveOpen())
+	}
+	fake.handles[2].done("", nil)
+	if a.saveOpen() {
+		t.Fatal("a.saveOpen() = true after reopened panel closed")
+	}
 }
 
 func TestSavePanelSyncErrorResetsState(t *testing.T) {
@@ -100,9 +127,28 @@ func TestSavePanelSyncErrorResetsState(t *testing.T) {
 		cfg:       config{SaveDir: t.TempDir()},
 		savePanel: fake,
 	}
-	a.saveOnMain(image.NewRGBA(image.Rect(0, 0, 1, 1)))
-	if a.saving {
-		t.Fatal("a.saving = true after synchronous error, want false")
+	imgA := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	imgB := image.NewRGBA(image.Rect(0, 0, 1, 1))
+
+	a.saveOnMain(imgA)
+	if a.saveOpen() {
+		t.Fatal("a.saveOpen() = true after synchronous error, want false")
+	}
+
+	// A sync error on a second image must not clear an already-open first panel.
+	fake.syncErr = nil
+	a.saveOnMain(imgA)
+	if !a.saveOpen() {
+		t.Fatal("a.saveOpen() = false after opening panel A")
+	}
+	fake.syncErr = errors.New("panel B failed")
+	a.saveOnMain(imgB)
+	if !a.saveOpen() {
+		t.Fatal("a.saveOpen() = false while panel A is still open")
+	}
+	fake.handles[0].done("", nil)
+	if a.saveOpen() {
+		t.Fatal("a.saveOpen() = true after panel A closed")
 	}
 }
 

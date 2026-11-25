@@ -10,9 +10,11 @@ import (
 
 type otherSavePanel struct{}
 
-var platformSavePanel savePanel = &otherSavePanel{}
+type otherSaveHandle struct{}
 
-func (otherSavePanel) show(opts saveOptions, done func(path string, err error)) {
+var platformSavePanel savePanel = otherSavePanel{}
+
+func (otherSavePanel) show(opts saveOptions, done func(path string, err error)) saveHandle {
 	go func() {
 		mygo.App.Focus()
 		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
@@ -23,8 +25,9 @@ func (otherSavePanel) show(opts saveOptions, done func(path string, err error)) 
 		})
 		mygo.RunOnMain(func() { done(path, err) })
 	}()
+	return otherSaveHandle{}
 }
 
-func (otherSavePanel) focus() {
+func (otherSaveHandle) focus() {
 	mygo.App.Focus()
 }

@@ -69,9 +69,9 @@ func newPin(a *app, img *image.RGBA, at mygo.Rectangle) *pin {
 		Content:           ui.View(p.view),
 	})
 	placeFreely(p.win)
-	// Keep newly created pins below an already-open save panel; the panel's
-	// completion handler raises all open pins once it closes.
-	if a.saving {
+	// Keep newly created pins below any already-open save panel; the last
+	// panel's completion handler raises all open pins once it closes.
+	if a.saveOpen() {
 		lowerPin(p.win)
 	} else {
 		raisePin(p.win)

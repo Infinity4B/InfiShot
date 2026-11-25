@@ -18,30 +18,38 @@ const (
 	nsModalResponseOK = 1
 )
 
-// darwinSavePanel presents a modeless NSSavePanel via
+// darwinSavePanel presents modeless NSSavePanel instances via
 // beginWithCompletionHandler: instead of MyGo's Dialog.Save (which runs
 // [NSSavePanel runModal]). An app-modal session blocks mouse and keyboard
 // delivery to every window whose worksWhenModal is NO, including the capture
-// overlay (MyGoPanel), so triggering a new capture while the save panel is
+// overlay (MyGoPanel), so triggering a new capture while a save panel is
 // open leaves the overlay frozen.
 //
-// All methods must be called on the main thread.
-type darwinSavePanel struct {
-	active objc.ID // retained NSSavePanel while visible; 0 when closed
+// Each show call retains its own NSSavePanel and returns a handle for it, so
+// different images can have save panels open simultaneously while repeated ⌘S
+// on the same image focuses its existing panel. All methods must be called on
+// the main thread.
+type darwinSavePanel struct{}
+
+type darwinSaveHandle struct {
+	panel objc.ID // retained NSSavePanel while visible; 0 once closed
 }
 
-var platformSavePanel savePanel = &darwinSavePanel{}
+var platformSavePanel savePanel = darwinSavePanel{}
 
-func (p *darwinSavePanel) show(opts saveOptions, done func(path string, err error)) {
+func (darwinSavePanel) show(opts saveOptions, done func(path string, err error)) saveHandle {
 	if err := macos.Load(appKitPath); err != nil {
 		done("", err)
-		return
+		return nil
 	}
 	// UniformTypeIdentifiers exists on macOS 11+; older systems fall back to
 	// setAllowedFileTypes: below.
 	_, _ = macos.Dlopen(utTypePath)
 
-	var setupErr error
+	var (
+		handle   *darwinSaveHandle
+		setupErr error
+	)
 	macos.WithPool(func() {
 		panel := macos.Send(macos.Class("NSSavePanel"), "savePanel")
 		if panel == 0 {
@@ -71,17 +79,15 @@ func (p *darwinSavePanel) show(opts saveOptions, done func(path string, err erro
 
 		// Retain the autoreleased panel until its completion handler runs so
 		// it stays alive across run-loop turns and can be brought forward on
-		// repeated ⌘S.
+		// repeated ⌘S for the same image.
 		macos.Send(panel, "retain")
-		p.active = panel
+		handle = &darwinSaveHandle{panel: panel}
 
 		blk := objc.NewBlock(func(_ objc.Block, resp int) {
 			var path string
 			macos.WithPool(func() {
 				defer macos.Release(panel)
-				if p.active == panel {
-					p.active = 0
-				}
+				handle.panel = 0
 				if resp == nsModalResponseOK {
 					if u := macos.Send(panel, "URL"); u != 0 {
 						path = macos.GoString(macos.Send(u, "path"))
@@ -97,22 +103,27 @@ func (p *darwinSavePanel) show(opts saveOptions, done func(path string, err erro
 		mygo.App.Focus()
 		macos.Send(panel, "setLevel:", nsModalPanelWindowLevel)
 		macos.Send(panel, "beginWithCompletionHandler:", blk)
-		if p.active == panel {
+		if handle.panel == panel {
 			macos.Send(panel, "setLevel:", nsModalPanelWindowLevel)
 		}
 		blk.Release()
 	})
 	if setupErr != nil {
 		done("", setupErr)
+		return nil
 	}
+	if handle == nil || handle.panel == 0 {
+		return nil
+	}
+	return handle
 }
 
-func (p *darwinSavePanel) focus() {
-	if p.active == 0 {
+func (h *darwinSaveHandle) focus() {
+	if h == nil || h.panel == 0 {
 		return
 	}
 	macos.WithPool(func() {
 		mygo.App.Focus()
-		macos.Send(p.active, "makeKeyAndOrderFront:", objc.ID(0))
+		macos.Send(h.panel, "makeKeyAndOrderFront:", objc.ID(0))
 	})
 }
