@@ -146,6 +146,22 @@ scripts/build.sh -i        # 打包后安装到 /Applications 并重新打开
 
 端到端测试：用 `go build -tags e2e` 编译，启动时设置 `MYGO_AUTOMATION=<socket 路径>`，然后用 MyGo 的 `mygo-automation` 驱动应用。
 
+### 发布
+
+推送 `v*` 标签会触发 GitHub Actions（`.github/workflows/release.yml`）在 macOS ARM64 环境下运行检查、打包并自动创建 GitHub Release，上传 `.dmg` 和 `.app` 压缩包：
+
+1. 修改 `mygo.json` 中的 `version`（例如改为 `"0.1.1"`）并提交。
+2. 打上对应的标签并推送：
+
+   ```sh
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+CI 会校验标签版本号（去掉开头的 `v`）是否与 `mygo.json` 中的 `version` 一致，不一致时构建会失败；也可以在 GitHub Actions 页面手动触发 `workflow_dispatch` 进行打包验证（不会创建 Release）。
+
+Release 中的安装包采用临时签名（ad-hoc），未经过 Apple 公证，首次打开时会被系统拦截，需要手动放行：右键点击 `InfiShot.app` 选择「打开」，或在 系统设置 › 隐私与安全性 中点击「仍要打开」。另见上文「权限」一节，临时签名版本每次更新后需要重新授予屏幕录制权限。
+
 ### 代码结构
 
 | 文件 | 内容 |
