@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release (macOS arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches mygo.json version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          config_version="$(jq -r '.version' mygo.json)"
+          if [[ -z "$config_version" || "$config_version" == "null" ]]; then
+            echo "::error::Failed to read version from mygo.json"
+            exit 1
+          fi
+          if [[ "$tag_version" != "$config_version" ]]; then
+            echo "::error::Tag version (${tag_version}) does not match mygo.json version (${config_version})"
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches mygo.json version ${config_version}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build macOS app and DMG (ad-hoc signed)
+        run: go tool mygo build
+
+      - name: Package .app archive and verify artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' mygo.json)"
+          if [[ -z "$version" || "$version" == "null" ]]; then
+            echo "::error::Failed to read version from mygo.json"
+            exit 1
+          fi
+          if [[ ! -d build/darwin-arm64/InfiShot.app ]]; then
+            echo "::error::Expected build/darwin-arm64/InfiShot.app was not produced"
+            exit 1
+          fi
+          found_dmg=0
+          for f in build/darwin-arm64/*.dmg; do
+            if [[ -f "$f" ]]; then
+              found_dmg=1
+              break
+            fi
+          done
+          if [[ "$found_dmg" -eq 0 ]]; then
+            echo "::error::No .dmg artifact found in build/darwin-arm64/"
+            exit 1
+          fi
+          ditto -c -k --keepParent build/darwin-arm64/InfiShot.app "build/darwin-arm64/infishot-${version}-arm64.zip"
+          ls -lh build/darwin-arm64/
+
+      - name: Upload workflow artifacts
+        if: github.event_name == 'workflow_dispatch' && github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infishot-darwin-arm64
+          path: |
+            build/darwin-arm64/*.dmg
+            build/darwin-arm64/*.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            build/darwin-arm64/*.dmg
+            build/darwin-arm64/*.zip
