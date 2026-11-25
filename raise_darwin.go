@@ -16,13 +16,18 @@ import (
 const (
 	nsFloatingWindowLevel    = 3
 	nsModalPanelWindowLevel  = 8
+	nsStatusWindowLevel      = 25
 	nsPopUpMenuWindowLevel   = 101
 	nsScreenSaverWindowLevel = 1000
 
-	// pinWindowLevel sits above macOS system surfaces (Dock 20, Notification
-	// Center 21, Siri 23, menu bar 24/25, Control Center 101) and below the
-	// capture overlay (1000), so a new capture still covers existing pins.
-	pinWindowLevel = nsPopUpMenuWindowLevel + 1
+	// pinWindowLevel matches NSPopUpMenuWindowLevel (101): above the Dock (20),
+	// Notification Center (21), Siri (23), and menu bar (24/25), and below the
+	// capture overlay (1000) so a new capture still covers existing pins.
+	// Sharing level 101 with NSMenu and Control Center keeps last-ordered-front
+	// ordering within the level: a pin created after Control Center stays above
+	// it, while a right-click context menu or menu-bar dropdown opened later
+	// still appears above the pin.
+	pinWindowLevel = nsPopUpMenuWindowLevel
 )
 
 // coverScreen puts the capture overlay over the whole display b, above
@@ -45,23 +50,20 @@ func placeFreely(w *mygo.Window) {
 	}
 }
 
-// raisePin lifts a pin window above macOS system surfaces (Dock, menu bar,
-// Notification Center, Control Center) while keeping it below the capture
-// overlay. MyGo maps AlwaysOnTop to NSFloatingWindowLevel (3), which stays
-// behind those surfaces; pins have no parent window and never call
-// SetAlwaysOnTop, so MyGo's applyLevel does not reset this level later.
+// raisePin lifts a pin window to pinWindowLevel (101), above the Dock,
+// Notification Center, Siri, and menu bar, while sharing the pop-up menu
+// level so context menus still open above it and staying below the capture
+// overlay (1000). MyGo maps AlwaysOnTop to NSFloatingWindowLevel (3), which
+// stays behind those system surfaces; pins have no parent window and never
+// call SetAlwaysOnTop, so MyGo's applyLevel does not reset this level later.
 // Call it on the main thread.
 func raisePin(w *mygo.Window) {
 	if w == nil {
 		return
 	}
 	if h := objc.ID(w.NativeHandle()); h != 0 {
-		raisePinHandle(h)
+		h.Send(objc.RegisterName("setLevel:"), pinWindowLevel)
 	}
-}
-
-func raisePinHandle(h objc.ID) {
-	h.Send(objc.RegisterName("setLevel:"), pinWindowLevel)
 }
 
 // lowerPin drops a pin window back to NSFloatingWindowLevel (3), below
@@ -72,12 +74,8 @@ func lowerPin(w *mygo.Window) {
 		return
 	}
 	if h := objc.ID(w.NativeHandle()); h != 0 {
-		lowerPinHandle(h)
+		h.Send(objc.RegisterName("setLevel:"), nsFloatingWindowLevel)
 	}
-}
-
-func lowerPinHandle(h objc.ID) {
-	h.Send(objc.RegisterName("setLevel:"), nsFloatingWindowLevel)
 }
 
 var unconstrained sync.Map // class → struct{}
