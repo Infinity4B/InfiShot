@@ -31,6 +31,11 @@ type app struct {
 	ocrs    []*ocrWindow
 	failed  []string // shortcuts that could not be registered
 	welcome *welcome
+	// saves tracks open save panels keyed by image, so repeated ⌘S on the same
+	// image focuses its panel while a different image opens its own panel.
+	// Open pins stay lowered whenever len(saves) > 0.
+	saves     map[*image.RGBA]saveHandle
+	savePanel savePanel // nil uses platformSavePanel
 	// grantedAtStart is whether the app had the Screen Recording
 	// permission when it started: macOS lets it capture only then.
 	grantedAtStart bool
@@ -173,7 +178,7 @@ func (a *app) use(act action, img *image.RGBA, at mygo.Rectangle) {
 			}
 		}()
 	case actSave:
-		go a.save(img)
+		a.save(img)
 	case actPin:
 		a.pins = append(a.pins, newPin(a, img, at))
 	case actOCR:
@@ -181,30 +186,123 @@ func (a *app) use(act action, img *image.RGBA, at mygo.Rectangle) {
 	}
 }
 
+type saveOptions struct {
+	title string
+	dir   string
+	name  string
+}
+
+// savePanel presents the native save dialog without blocking the main thread.
+// Platform files provide platformSavePanel.
+type savePanel interface {
+	// show opens a save panel and returns a handle that brings it forward
+	// while open. It calls done on the main thread when the panel closes with
+	// the chosen path, or "" if cancelled. If done is invoked synchronously
+	// (e.g. on setup failure), show may return nil.
+	show(opts saveOptions, done func(path string, err error)) saveHandle
+}
+
+// saveHandle refers to an open save panel on the main thread.
+type saveHandle interface {
+	focus()
+}
+
+// saveOpen reports whether any save panel is currently open.
+func (a *app) saveOpen() bool { return len(a.saves) > 0 }
+
+// save opens a save panel for img on the main thread, lowering open pins while
+// any save panel is visible so they cannot cover it. A repeated request for an
+// image that already has an open panel brings that panel forward; a request for
+// a different image opens its own modeless panel.
 func (a *app) save(img *image.RGBA) {
-	dir := a.cfg.saveDir()
-	_ = os.MkdirAll(dir, 0o755)
-	name := "InfiShot_" + time.Now().Format("20060102_150405") + ".png"
-	mygo.App.Focus()
-	path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
-		Title:             "保存截图",
-		DefaultPath:       filepath.Join(dir, name),
-		Filters:           []mygo.FileFilter{{Name: "PNG 图片", Extensions: []string{"png"}}},
-		CreateDirectories: true,
-	})
-	if err != nil || path == "" {
+	mygo.RunOnMain(func() { a.saveOnMain(img) })
+}
+
+func (a *app) saveOnMain(img *image.RGBA) {
+	if h, ok := a.saves[img]; ok {
+		if h != nil {
+			h.focus()
+		}
 		return
 	}
-	if !strings.EqualFold(filepath.Ext(path), ".png") {
-		path += ".png"
+	panel := a.savePanel
+	if panel == nil {
+		panel = platformSavePanel
 	}
+	if a.saves == nil {
+		a.saves = map[*image.RGBA]saveHandle{}
+	}
+	first := len(a.saves) == 0
+	// Reserve the slot before show so a synchronous done callback deletes it
+	// cleanly without leaving a stale entry behind.
+	var closed bool
+	a.saves[img] = nil
+	if first {
+		a.lowerPins()
+	}
+
+	dir := a.cfg.saveDir()
+	_ = os.MkdirAll(dir, 0o755)
+	opts := saveOptions{
+		title: "保存截图",
+		dir:   dir,
+		name:  "InfiShot_" + time.Now().Format("20060102_150405") + ".png",
+	}
+	h := panel.show(opts, func(path string, err error) {
+		closed = true
+		delete(a.saves, img)
+		if len(a.saves) == 0 {
+			a.raisePins()
+		}
+		if err != nil {
+			log.Printf("保存截图: %v", err)
+			return
+		}
+		if path == "" {
+			return
+		}
+		path = ensurePNGExt(path)
+		go func() {
+			if err := writeSavedPNG(path, img); err != nil {
+				a.fail("保存失败", err)
+			}
+		}()
+	})
+	if !closed {
+		a.saves[img] = h
+	}
+}
+
+func (a *app) lowerPins() {
+	for _, p := range a.pins {
+		if p.win != nil && !p.win.IsDestroyed() {
+			lowerPin(p.win)
+		}
+	}
+}
+
+func (a *app) raisePins() {
+	for _, p := range a.pins {
+		if p.win != nil && !p.win.IsDestroyed() {
+			raisePin(p.win)
+		}
+	}
+}
+
+// ensurePNGExt appends ".png" when path does not already end in it.
+func ensurePNGExt(path string) string {
+	if path == "" || strings.EqualFold(filepath.Ext(path), ".png") {
+		return path
+	}
+	return path + ".png"
+}
+
+func writeSavedPNG(path string, img image.Image) error {
 	data, err := encodePNG(img, png.DefaultCompression)
-	if err == nil {
-		err = os.WriteFile(path, data, 0o644)
-	}
 	if err != nil {
-		a.fail("保存失败", err)
+		return err
 	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 // pinClipboard pins the image on the clipboard under the pointer.

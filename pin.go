@@ -7,7 +7,6 @@ import (
 	"image/png"
 	"log"
 	"math"
-	"slices"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -70,7 +69,13 @@ func newPin(a *app, img *image.RGBA, at mygo.Rectangle) *pin {
 		Content:           ui.View(p.view),
 	})
 	placeFreely(p.win)
-	raisePin(p.win)
+	// Keep newly created pins below any already-open save panel; the last
+	// panel's completion handler raises all open pins once it closes.
+	if a.saveOpen() {
+		lowerPin(p.win)
+	} else {
+		raisePin(p.win)
+	}
 	// Where it was taken from, even at (0, 0), which would center it.
 	p.win.SetBounds(at)
 	p.win.OnFocus(func() { p.focused = true; p.win.Invalidate() })
@@ -353,29 +358,7 @@ func (p *pin) recognizeText() {
 	}()
 }
 
-// save opens the save panel for the pin's image, lowering open pins while
-// the modal dialog is shown so they cannot cover it.
-func (p *pin) save() {
-	pins := slices.Clone(p.a.pins)
-	if !slices.Contains(pins, p) {
-		pins = append(pins, p)
-	}
-	for _, q := range pins {
-		if q.win != nil && !q.win.IsDestroyed() {
-			lowerPin(q.win)
-		}
-	}
-	go func() {
-		defer mygo.RunOnMain(func() {
-			for _, q := range pins {
-				if q.win != nil && !q.win.IsDestroyed() {
-					raisePin(q.win)
-				}
-			}
-		})
-		p.a.save(p.img)
-	}()
-}
+func (p *pin) save() { p.a.use(actSave, p.img, mygo.Rectangle{}) }
 
 func (p *pin) recognize() { p.a.use(actOCR, p.img, p.win.Bounds()) }
 
